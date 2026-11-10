@@ -1,0 +1,81 @@
+# Dependencies and build output
+node_modules/
+.next/
+dist/
+build/
+out/
+bin/
+obj/
+coverage/
+*.tsbuildinfo
+
+# Private configuration and local state
+.env
+.env.*
+!.env.example
+.npmrc
+# Hidden local tooling and service-state directories
+.[!.]*/
+tmp/
+data/
+volumes/
+logs/
+test-output/
+*.log
+*.db
+*.sqlite*
+*.dump
+*.sql.gz
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
+*.keystore
+*.dpapi
+*.sock
+*credentials*
+*session*.json
+*identity*.json
+*ticket*.json
+*pairing*.json
+lab-signing-keys.json
+product-origin.v1
+
+# Virtual machines, installers and archives
+*.iso
+*.vhd*
+*.vmdk
+*.qcow*
+*.ova
+*.ovf
+*.dmg
+*.pkg
+*.msi
+*.exe
+*.app/
+*.zip
+*.tar*
+*.7z
+*.dmp
+
+# Personal media and operating-system files
+screenshots-private/
+recordings/
+*.mp4
+*.mov
+*.webm
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Only reviewed documents belong at the repository root
+/*.md
+!/README.md
+!/SECURITY.md
+!/LICENCE-STATUS.md
+!/THIRD_PARTY_NOTICES.md
+
+# Private audit notes
+private-audit/
