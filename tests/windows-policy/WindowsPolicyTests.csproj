@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../excerpts/windows/Amniora.Runner/ActivationGate.cs" Link="ActivationGate.cs" />
+    <Compile Include="../../excerpts/windows/Amniora.Runner/ActivationUri.cs" Link="ActivationUri.cs" />
+    <Compile Include="../../excerpts/windows/Amniora.Runner/RunnerUri.cs" Link="RunnerUri.cs" />
+    <Compile Include="../../excerpts/windows/Amniora.Runner/RunnerState.cs" Link="RunnerState.cs" />
+    <Compile Include="../../excerpts/windows/Amniora.Runner/RunnerDiagnostics.cs" Link="RunnerDiagnostics.cs" />
+    <Compile Include="../../excerpts/windows/Amniora.Runner/DiagnosticsCoordinator.cs" Link="DiagnosticsCoordinator.cs" />
+    <Compile Include="../../excerpts/windows/Amniora.Runner/ArchitectureContract.cs" Link="ArchitectureContract.cs" />
+    <Compile Include="../../excerpts/windows/Amniora.Viewer/ViewerPolicy.cs" Link="ViewerPolicy.cs" />
+  </ItemGroup>
+</Project>
