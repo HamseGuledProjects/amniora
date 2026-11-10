@@ -1,0 +1,26 @@
+# Selected development history
+
+This timeline is rewritten from reviewed source, local Git history, the development log and engineering reports. It records implementation milestones, not a claim that every branch reached the same release state. Historical validation is separate from the portfolio checks described in [testing and limitations](testing-and-limitations.md).
+
+| Period | Engineering goal | Implementation and decision | Validation evidence | Remaining limitation |
+| --- | --- | --- | --- | --- |
+| July 2026 | Build a usable investigation workspace | Added authentication, saved labs, progress, Tutor conversations and task guidance; developed synthetic Linux evidence generation. | Source history, route/UI implementations and the development log record the progression. | Hosted authentication, persistence and provider services are not reproduced by this export. |
+| July–August 2026 | Make Linux investigations internally consistent | Introduced deterministic generation, semantic simulation, evidence grounding, task contracts and structured assessment boundaries. | Reviewed validators and regression suites cover chronology, identity, task-local evidence and grading input boundaries. | Passing synthetic cases is not proof that every generated narrative or answer is correct. |
+| August–September 2026 | Improve the learner-facing evidence flow | Refined task solvability, evidence exports, timestamps, feedback and the saved-investigation workspace. | Source changes and dated development-log entries describe the work; local tests provide narrower reproducible evidence. | Hosted behaviour and historical model-dependent checks were not repeated for this edition. |
+| September 2026 | Turn web-security scenarios into executable labs | Added lab compilation, signed packages, runtime state and containment controls; explored local and hosted execution adapters. | Runtime contracts and engineering reports record lifecycle, persistence and security work. | My Computer and Cloud remained deferred product paths; their presence in source is not a completed-service claim. |
+| 28–30 September 2026 | Establish a local-first macOS path | Built opaque URI activation, pairing, authenticated guest transport, signed-package execution, a narrow Docker helper and an isolated viewer. Integrated website-owned lifecycle controls. | Historical reports describe a macOS ARM64 host with an Ubuntu 24.04 ARM64 guest, hostile viewer checks, generation-changing reset, stop cleanup and relaunch. | The viewer's macOS network entitlement remained a qualified boundary. Public signing and distribution were not complete. |
+| 1 October 2026 | Add the Windows desktop foundation | Implemented a WinForms Runner, current-user URI handling, DPAPI identity storage and a separate WebView2 viewer. Added Windows-to-guest integration and a live guest harness. | W1 reports record local protocol, installed-application lifecycle and hostile viewer checks. Later source establishes W2 integration work. | The reviewed W1 reports predate W2. A complete retained W2 validation record was not established in this portfolio review. |
+| 1–4 October 2026 | Improve cross-platform recovery and readiness | Separated presence, readiness and runtime state; added immediate lifecycle preflight, architecture selection, pairing-origin checks and more reliable test-media construction. | Continuity source, contract suites and commit history support the implementation decisions. | Source completion, live validation and promotion were not shown to converge on one final checkpoint. |
+| Portfolio edition | Preserve reviewable engineering evidence | Selected safe source, rewrote documentation, applied the [MIT licence](../LICENSE) to original work and separated the export from private history and operational material. | The included offline checks and separate private publication audit define this edition's validation scope. | Active product development has been cancelled. Historical release limitations remain. |
+
+## Lessons from the work
+
+I learned to separate a process being present from its environment being ready. A recent heartbeat does not tell me that the VM, guest service and Docker can run the next command. Checking readiness as part of the operation made that distinction explicit.
+
+Desktop activation also needed operating-system testing. A URI parser could pass unit checks while browser navigation, cold launch, warm launch or a hidden window still behaved incorrectly.
+
+Reset and Stop became easier to reason about once runtime identity and generation were part of every operation. Cleanup needed exact ownership records so a recovery path could remove its own resources without touching unrelated Docker work.
+
+Canonical signing formats and matching test artefacts to their verification keys mattered as much as the choice of signature algorithm. A valid signature check is only useful when every component agrees on the bytes and authority it is verifying.
+
+Moving lab execution to the learner's machine reduced dependence on hosted lab compute, but it did not remove orchestration costs or turn local results into trusted attestation. That trade-off shaped both the architecture and its limits.
