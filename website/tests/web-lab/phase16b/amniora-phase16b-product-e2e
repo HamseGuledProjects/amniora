@@ -1,0 +1,716 @@
+#!/bin/bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 077
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+readonly ENGINEERING_USER="amniora"
+readonly RUNNER_USER="amniora-runner"
+readonly RUNNER_GROUP="amniora-runner"
+readonly DOCKER_GROUP="docker"
+readonly SERVICE="amniora-runner-phase16a2b1.service"
+readonly STAGE_ROOT="/home/amniora/.cache/amniora-phase16a2b1"
+readonly INSTALL_ROOT="/opt/amniora-runner-phase16a2b1"
+readonly STATE_ROOT="/var/lib/amniora-runner/phase16a2b1"
+readonly REPLAY_ROOT="/var/lib/amniora-runner/phase16a2b1-replay"
+readonly ENGINEERING_ROOT="/var/lib/amniora-phase16b-product-e2e"
+readonly MEMBERSHIP_MARKER="${ENGINEERING_ROOT}/runner-docker-membership-added"
+readonly CLEANUP_MARKER="${ENGINEERING_ROOT}/cleanup-complete"
+readonly INITIAL_PID="${ENGINEERING_ROOT}/initial-runner.pid"
+readonly INITIAL_START_TICKS="${ENGINEERING_ROOT}/initial-runner.start-ticks"
+readonly INITIAL_LAUNCHER_PID="${ENGINEERING_ROOT}/initial-runner.launcher-pid"
+readonly BOOTSTRAP_STATE="${STATE_ROOT}/bootstrap-state.v1"
+readonly INSPECT_SCRIPT="${INSTALL_ROOT}/engineering/inspect-runtime.cjs"
+readonly UNIT_PATH="/etc/systemd/system/${SERVICE}"
+readonly POLICY_PATH="/etc/sudoers.d/amniora-phase16b-product-e2e"
+readonly DISPATCHER_PATH="/usr/local/sbin/amniora-phase16b-product-e2e"
+readonly IMAGE="amniora-local-runner:15a-1"
+readonly MANAGED_LABEL="com.amniora.local-runner.managed=true"
+readonly RUNTIME_MODE_LABEL="com.amniora.local-runner.runtime-mode=local-runner"
+readonly BROKER_PORT="43128"
+
+die() {
+  printf 'phase16b_dispatcher_error:%s\n' "$1" >&2
+  exit 64
+}
+
+require_root() {
+  [[ ${EUID} -eq 0 ]] || die "root_required"
+}
+
+runner_in_docker_group() {
+  /usr/bin/id -nG "$RUNNER_USER" 2>/dev/null | /usr/bin/tr ' ' '\n' | /usr/bin/grep -Fxq "$DOCKER_GROUP"
+}
+
+engineering_user_in_docker_group() {
+  /usr/bin/id -nG "$ENGINEERING_USER" 2>/dev/null | /usr/bin/tr ' ' '\n' | /usr/bin/grep -Fxq "$DOCKER_GROUP"
+}
+
+require_safe_stage_file() {
+  local target="$1"
+  [[ -f "$target" && ! -L "$target" ]] || die "invalid_stage_file"
+  [[ $(/usr/bin/realpath -e -- "$target") == "$target" ]] || die "invalid_stage_path"
+  [[ $(/usr/bin/stat -c '%U' -- "$target") == "$ENGINEERING_USER" ]] || die "invalid_stage_owner"
+}
+
+validate_archive_paths() {
+  local archive="$1"
+  local entry
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    [[ "$entry" != /* && "$entry" != ".." && "$entry" != ../* && "$entry" != */../* && "$entry" != */.. ]] ||
+      die "unsafe_archive_path"
+  done < <(/usr/bin/tar -tf "$archive")
+}
+
+managed_container_ids() {
+  /usr/bin/docker container ls -aq \
+    --filter "label=${MANAGED_LABEL}" \
+    --filter "label=${RUNTIME_MODE_LABEL}"
+}
+
+managed_network_ids() {
+  /usr/bin/docker network ls -q \
+    --filter "label=${MANAGED_LABEL}" \
+    --filter "label=${RUNTIME_MODE_LABEL}"
+}
+
+managed_counts() {
+  local containers networks
+  containers=$(managed_container_ids | /usr/bin/wc -l)
+  networks=$(managed_network_ids | /usr/bin/wc -l)
+  printf '{"containers":%d,"networks":%d}\n' "$containers" "$networks"
+}
+
+write_fixed_inspector() {
+  /usr/bin/cat >"$INSPECT_SCRIPT" <<'NODE'
+"use strict";
+const fs = require("node:fs");
+const { execFileSync } = require("node:child_process");
+const statePath = "/var/lib/amniora-runner/phase16a2b1/runtime/state.json";
+const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+if (!/^[0-9a-f]{32}$/.test(state.sessionId || "")) throw new Error("invalid_runtime_session");
+if (!Number.isSafeInteger(state.generation) || state.generation < 1) throw new Error("invalid_runtime_generation");
+if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(state.endpoint || "")) throw new Error("invalid_runtime_endpoint");
+const docker = (...args) => execFileSync("/usr/bin/docker", args, { encoding: "utf8" }).trim();
+const fixed = [
+  "--filter", "label=com.amniora.local-runner.managed=true",
+  "--filter", "label=com.amniora.local-runner.runtime-mode=local-runner",
+  "--filter", "label=com.amniora.local-runner.session=" + state.sessionId,
+];
+const containerIds = docker("container", "ls", "-aq", ...fixed).split("\n").filter(Boolean);
+const networkIds = docker("network", "ls", "-q", ...fixed).split("\n").filter(Boolean);
+const containers = containerIds.length ? JSON.parse(docker("inspect", ...containerIds)) : [];
+const networks = networkIds.length ? JSON.parse(docker("network", "inspect", ...networkIds)) : [];
+for (const detail of [...containers, ...networks]) {
+  const labels = detail.Config?.Labels ?? detail.Labels ?? {};
+  if (labels["com.amniora.local-runner.managed"] !== "true" ||
+      labels["com.amniora.local-runner.runtime-mode"] !== "local-runner" ||
+      labels["com.amniora.local-runner.session"] !== state.sessionId) throw new Error("unmanaged_runtime_resource");
+}
+(async () => {
+  let lanReachable = false;
+  try {
+    const response = await fetch(state.endpoint.replace("127.0.0.1", "10.0.2.15"), { signal: AbortSignal.timeout(1000) });
+    lanReachable = response.ok;
+  } catch {}
+  process.stdout.write(JSON.stringify({ containers, networks, endpoint: state.endpoint, lanReachable }));
+})().catch(error => {
+  process.stderr.write(String(error?.message || error) + "\n");
+  process.exitCode = 1;
+});
+NODE
+  /usr/bin/chown root:root "$INSPECT_SCRIPT"
+  /usr/bin/chmod 0555 "$INSPECT_SCRIPT"
+}
+
+write_fixed_service() {
+  local temporary="${ENGINEERING_ROOT}/${SERVICE}"
+  /usr/bin/cat >"$temporary" <<EOF
+[Unit]
+Description=Amniora BYO Runner Phase 16B engineering service
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=${RUNNER_USER}
+Group=${RUNNER_GROUP}
+SupplementaryGroups=docker
+WorkingDirectory=${INSTALL_ROOT}/runner
+Environment=HOME=/var/lib/amniora-runner
+Environment=AMNIORA_BYO_BROKER_HOST=10.0.2.2
+Environment=AMNIORA_BYO_BROKER_PORT=${BROKER_PORT}
+Environment=AMNIORA_BYO_BROKER_SERVER_NAME=amniora-byo-broker.test
+Environment=AMNIORA_BYO_BROKER_CA_PATH=${INSTALL_ROOT}/broker-cert.pem
+Environment=AMNIORA_BYO_OWNER_ID=11111111-1111-4111-8111-111111111111
+Environment=AMNIORA_BYO_STATE_DIR=${STATE_ROOT}
+Environment=AMNIORA_BYO_VERIFICATION_KEYS_PATH=${INSTALL_ROOT}/verification-keys.json
+Environment=AMNIORA_BYO_RUNTIME_CONTAINER_CONTEXT=${INSTALL_ROOT}/runner/container
+ExecStart=${INSTALL_ROOT}/node/bin/node ${INSTALL_ROOT}/runner/vm-runtime-entry.cjs serve
+Restart=on-failure
+RestartSec=1
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/amniora-runner
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  /usr/bin/install -o root -g root -m 0644 "$temporary" "$UNIT_PATH"
+  /usr/bin/rm -f -- "$temporary"
+}
+
+read_enrollment_token() {
+  local token="" extra=""
+  IFS= read -r token || [[ -n "$token" ]] || die "missing_enrollment"
+  [[ "$token" =~ ^[A-Za-z0-9_-]{43}$ ]] || die "invalid_enrollment"
+  if IFS= read -r -n 1 extra; then die "unexpected_enrollment_input"; fi
+  printf '%s' "$token"
+}
+
+read_bootstrap_state() {
+  local target="$1" key value line_count=0
+  local -A seen=()
+  BOOTSTRAP_SCHEMA=""
+  BOOTSTRAP_STAGE=""
+  BOOTSTRAP_PID=""
+  BOOTSTRAP_PPID=""
+  BOOTSTRAP_UID=""
+  BOOTSTRAP_ELAPSED_MS=""
+  BOOTSTRAP_EXIT_CLASSIFICATION=""
+  BOOTSTRAP_EXIT_STATUS=""
+  [[ -f "$target" && ! -L "$target" ]] || return 1
+  [[ $(/usr/bin/realpath -e -- "$target") == "$target" ]] || die "invalid_bootstrap_state_path"
+  [[ $(/usr/bin/stat -c '%U' -- "$target") == "$RUNNER_USER" ]] || die "invalid_bootstrap_state_owner"
+  [[ $(/usr/bin/stat -c '%a' -- "$target") == "600" ]] || die "invalid_bootstrap_state_mode"
+  while IFS='=' read -r key value; do
+    [[ -n "$key" && -z "${seen[$key]:-}" ]] || die "invalid_bootstrap_state"
+    seen[$key]=1
+    line_count=$((line_count + 1))
+    case "$key" in
+      schema) BOOTSTRAP_SCHEMA="$value" ;;
+      stage) BOOTSTRAP_STAGE="$value" ;;
+      pid) BOOTSTRAP_PID="$value" ;;
+      ppid) BOOTSTRAP_PPID="$value" ;;
+      uid) BOOTSTRAP_UID="$value" ;;
+      elapsed_ms) BOOTSTRAP_ELAPSED_MS="$value" ;;
+      exit_classification) BOOTSTRAP_EXIT_CLASSIFICATION="$value" ;;
+      exit_status) BOOTSTRAP_EXIT_STATUS="$value" ;;
+      *) die "invalid_bootstrap_state_key" ;;
+    esac
+  done <"$target"
+  [[ "$line_count" -eq 8 && "$BOOTSTRAP_SCHEMA" == "1" ]] || die "invalid_bootstrap_state"
+  [[ "$BOOTSTRAP_STAGE" =~ ^(PROCESS_ALIVE|RUNNER_STARTED|TRANSPORT_CONNECTING|CONNECTED|FAILED)$ ]] ||
+    die "invalid_bootstrap_stage"
+  [[ "$BOOTSTRAP_PID" =~ ^[1-9][0-9]*$ && "$BOOTSTRAP_PPID" =~ ^[1-9][0-9]*$ &&
+     "$BOOTSTRAP_UID" =~ ^(0|[1-9][0-9]*)$ && "$BOOTSTRAP_ELAPSED_MS" =~ ^(0|[1-9][0-9]*)$ &&
+     "$BOOTSTRAP_EXIT_STATUS" =~ ^(0|[1-9][0-9]*)$ ]] || die "invalid_bootstrap_state_value"
+  [[ "$BOOTSTRAP_EXIT_CLASSIFICATION" =~ ^(NONE|STARTUP_ERROR|TRANSPORT_ERROR|RUNTIME_ERROR|ENROLLMENT_INVALID|ENROLLMENT_EXPIRED|ENROLLMENT_REPLAYED)$ ]] ||
+    die "invalid_bootstrap_exit_classification"
+  if [[ "$BOOTSTRAP_STAGE" == "FAILED" ]]; then
+    [[ "$BOOTSTRAP_EXIT_CLASSIFICATION" != "NONE" && "$BOOTSTRAP_EXIT_STATUS" -ne 0 ]] || die "invalid_bootstrap_failure"
+  else
+    [[ "$BOOTSTRAP_EXIT_CLASSIFICATION" == "NONE" && "$BOOTSTRAP_EXIT_STATUS" -eq 0 ]] || die "invalid_bootstrap_success"
+  fi
+}
+
+runner_process_snapshot() {
+  local pid="$1" expected_uid uid_line stat_line stat_rest
+  local -a stat_fields
+  PROCESS_SNAPSHOT_FAILURE="UNAVAILABLE"
+  [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/${pid}/status" && -r "/proc/${pid}/stat" ]] || return 1
+  stat_line=$(<"/proc/${pid}/stat") || return 1
+  stat_rest=${stat_line##*) }
+  IFS=' ' read -r -a stat_fields <<<"$stat_rest"
+  [[ ${#stat_fields[@]} -ge 20 ]] || { PROCESS_SNAPSHOT_FAILURE="STAT"; return 1; }
+  PROCESS_STATE="${stat_fields[0]}"
+  PROCESS_PPID="${stat_fields[1]}"
+  PROCESS_START_TICKS="${stat_fields[19]}"
+  if [[ "$PROCESS_STATE" =~ ^[ZXx]$ ]]; then PROCESS_SNAPSHOT_FAILURE="EXITED"; return 1; fi
+  [[ "$PROCESS_STATE" =~ ^[RSDITtW]$ && "$PROCESS_PPID" =~ ^[1-9][0-9]*$ && "$PROCESS_START_TICKS" =~ ^[1-9][0-9]*$ ]] ||
+    { PROCESS_SNAPSHOT_FAILURE="STAT"; return 1; }
+  expected_uid=$(/usr/bin/id -u "$RUNNER_USER")
+  uid_line=$(/usr/bin/grep -m1 '^Uid:' "/proc/${pid}/status") || return 1
+  read -r _ PROCESS_REAL_UID PROCESS_EFFECTIVE_UID _ <<<"$uid_line"
+  [[ "$PROCESS_REAL_UID" == "$expected_uid" && "$PROCESS_EFFECTIVE_UID" == "$expected_uid" ]] ||
+    { PROCESS_SNAPSHOT_FAILURE="UID"; return 1; }
+  PROCESS_EXECUTABLE=$(/usr/bin/readlink -e -- "/proc/${pid}/exe") || { PROCESS_SNAPSHOT_FAILURE="EXECUTABLE"; return 1; }
+  [[ "$PROCESS_EXECUTABLE" == $(/usr/bin/realpath -e -- "${INSTALL_ROOT}/node/bin/node") ]] ||
+    { PROCESS_SNAPSHOT_FAILURE="EXECUTABLE"; return 1; }
+  PROCESS_SNAPSHOT_FAILURE="NONE"
+}
+
+observe_runner_child() {
+  local launcher="$1" child
+  local -a children=()
+  [[ "$launcher" =~ ^[1-9][0-9]*$ && -r "/proc/${launcher}/task/${launcher}/children" ]] || return 1
+  IFS=' ' read -r -a children <"/proc/${launcher}/task/${launcher}/children" || return 1
+  for child in "${children[@]}"; do
+    if runner_process_snapshot "$child" && [[ "$PROCESS_PPID" == "$launcher" ]]; then
+      OBSERVED_CHILD_PID="$child"
+      OBSERVED_CHILD_PPID="$PROCESS_PPID"
+      OBSERVED_CHILD_UID="$PROCESS_REAL_UID"
+      OBSERVED_CHILD_STATE="$PROCESS_STATE"
+      OBSERVED_CHILD_START_TICKS="$PROCESS_START_TICKS"
+      return 0
+    fi
+  done
+  return 1
+}
+
+emit_launch_observation() {
+  local observed="$1" pid="$2" ppid="$3" uid="$4" state="$5" identity="$6"
+  [[ "$observed" =~ ^(true|false)$ && "$pid" =~ ^(0|[1-9][0-9]*)$ && "$ppid" =~ ^(0|[1-9][0-9]*)$ &&
+     "$uid" =~ ^(0|[1-9][0-9]*)$ && "$state" =~ ^(R|S|D|I|T|t|W|EXITED|UNKNOWN)$ &&
+     "$identity" =~ ^(MATCH|UNAVAILABLE)$ ]] || die "invalid_launch_observation"
+  printf '{"childObserved":%s,"pid":%d,"ppid":%d,"uid":%d,"processState":"%s","executableIdentity":"%s"}\n' \
+    "$observed" "$pid" "$ppid" "$uid" "$state" "$identity"
+}
+
+stop_observed_child() {
+  local pid="$1" expected_start_ticks="$2"
+  if [[ "$pid" =~ ^[1-9][0-9]*$ && "$expected_start_ticks" =~ ^[1-9][0-9]*$ ]] &&
+     runner_process_snapshot "$pid" && [[ "$PROCESS_START_TICKS" == "$expected_start_ticks" ]]; then
+    kill "$pid" 2>/dev/null || true
+    for _ in {1..30}; do
+      kill -0 "$pid" 2>/dev/null || break
+      /usr/bin/sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null && runner_process_snapshot "$pid" && [[ "$PROCESS_START_TICKS" == "$expected_start_ticks" ]]; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  fi
+}
+
+write_initial_identity() {
+  printf '%s\n' "$BOOTSTRAP_PID" >"$INITIAL_PID"
+  printf '%s\n' "$PROCESS_START_TICKS" >"$INITIAL_START_TICKS"
+  printf '%s\n' "$1" >"$INITIAL_LAUNCHER_PID"
+  /usr/bin/chown root:root "$INITIAL_PID" "$INITIAL_START_TICKS" "$INITIAL_LAUNCHER_PID"
+  /usr/bin/chmod 0600 "$INITIAL_PID" "$INITIAL_START_TICKS" "$INITIAL_LAUNCHER_PID"
+}
+
+abort_initial_runner() {
+  local launcher="$1" reason="$2"
+  kill "$launcher" 2>/dev/null || true
+  for _ in {1..30}; do
+    kill -0 "$launcher" 2>/dev/null || break
+    /usr/bin/sleep 0.1
+  done
+  kill -KILL "$launcher" 2>/dev/null || true
+  set +e
+  wait "$launcher" 2>/dev/null
+  set -e
+  die "$reason"
+}
+
+emit_bootstrap_state() {
+  local process_exists="$1" executable_matches="$2" process_state="$3" start_ticks="$4" launcher_pid="${5:-0}"
+  local executable_path="" executable_basename=""
+  if [[ "$executable_matches" == "true" ]]; then
+    executable_path="${INSTALL_ROOT}/node/bin/node"
+    executable_basename="node"
+  fi
+  printf '{"stage":"%s","pid":%d,"ppid":%d,"uid":%d,"launcherPid":%d,"childPidObserved":true,"elapsedMs":%d,"exitClassification":"%s","exitStatus":%d,"processExists":%s,"executableMatches":%s,"executableBasename":"%s","executablePath":"%s","processState":"%s","startTicks":%d}\n' \
+    "$BOOTSTRAP_STAGE" "$BOOTSTRAP_PID" "$BOOTSTRAP_PPID" "$BOOTSTRAP_UID" "$launcher_pid" "$BOOTSTRAP_ELAPSED_MS" \
+    "$BOOTSTRAP_EXIT_CLASSIFICATION" "$BOOTSTRAP_EXIT_STATUS" "$process_exists" "$executable_matches" \
+    "$executable_basename" "$executable_path" "$process_state" "$start_ticks"
+}
+
+stop_initial_runner() {
+  local pid="" expected_start_ticks=""
+  if [[ -f "$INITIAL_PID" && ! -L "$INITIAL_PID" && -f "$INITIAL_START_TICKS" && ! -L "$INITIAL_START_TICKS" ]]; then
+    pid=$(<"$INITIAL_PID")
+    expected_start_ticks=$(<"$INITIAL_START_TICKS")
+    if [[ "$pid" =~ ^[1-9][0-9]*$ && "$expected_start_ticks" =~ ^[1-9][0-9]*$ ]] &&
+       runner_process_snapshot "$pid" && [[ "$PROCESS_START_TICKS" == "$expected_start_ticks" ]]; then
+      kill "$pid" 2>/dev/null || true
+      for _ in {1..30}; do
+        kill -0 "$pid" 2>/dev/null || break
+        /usr/bin/sleep 0.1
+      done
+      if kill -0 "$pid" 2>/dev/null && runner_process_snapshot "$pid" && [[ "$PROCESS_START_TICKS" == "$expected_start_ticks" ]]; then
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
+    fi
+  fi
+  /usr/bin/rm -f -- "$INITIAL_PID" "$INITIAL_START_TICKS" "$INITIAL_LAUNCHER_PID" "$BOOTSTRAP_STATE"
+}
+
+verb_preflight() {
+  local required
+  for required in /usr/bin/docker /usr/bin/systemctl /usr/bin/install /usr/bin/tar /usr/bin/mv \
+    /usr/bin/chown /usr/bin/chmod /usr/bin/rm /usr/sbin/useradd /usr/sbin/usermod /usr/sbin/runuser \
+    /usr/bin/gpasswd /usr/bin/nohup /usr/bin/env /usr/bin/timeout /usr/bin/sleep /usr/bin/readlink \
+    /usr/bin/realpath /usr/bin/stat /usr/bin/grep /usr/bin/id; do
+    [[ -x "$required" ]] || die "missing_required_executable"
+  done
+  engineering_user_in_docker_group && die "engineering_user_has_docker_access"
+  /usr/bin/getent group "$DOCKER_GROUP" >/dev/null || die "docker_group_missing"
+  /usr/bin/systemctl is-active --quiet docker || die "docker_service_inactive"
+  local os
+  os=$(/usr/bin/uname -srm)
+  if [[ -r /etc/os-release ]]; then
+    os=$(set +u; source /etc/os-release; printf '%s' "${PRETTY_NAME:-$os}")
+  fi
+  printf 'os=%s\n' "$os"
+  printf 'architecture=%s\n' "$(/usr/bin/uname -m)"
+  printf 'docker_service=active\n'
+  printf 'docker_client=%s\n' "$(/usr/bin/docker --version)"
+  printf 'managed_containers=%s\n' "$(managed_container_ids | /usr/bin/wc -l)"
+  printf 'managed_networks=%s\n' "$(managed_network_ids | /usr/bin/wc -l)"
+  if /usr/bin/docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    printf 'test_image_present=yes\n'
+  else
+    printf 'test_image_present=no\n'
+  fi
+  printf 'engineering_user_docker=no\n'
+}
+
+verb_install() {
+  local runner_archive="${STAGE_ROOT}/runner.tar.gz"
+  local broker_cert="${STAGE_ROOT}/broker-cert.pem"
+  local verification_keys="${STAGE_ROOT}/verification-keys.json"
+  local node_archives node_archive node_name node_directory
+  require_safe_stage_file "$runner_archive"
+  require_safe_stage_file "$broker_cert"
+  require_safe_stage_file "$verification_keys"
+  shopt -s nullglob
+  node_archives=("${STAGE_ROOT}"/node-v*-linux-arm64.tar.xz)
+  shopt -u nullglob
+  [[ ${#node_archives[@]} -eq 1 ]] || die "invalid_node_archive_count"
+  node_archive="${node_archives[0]}"
+  require_safe_stage_file "$node_archive"
+  node_name=${node_archive##*/}
+  [[ "$node_name" =~ ^node-v[0-9]+\.[0-9]+\.[0-9]+-linux-arm64\.tar\.xz$ ]] || die "invalid_node_archive_name"
+  node_directory=${node_name%.tar.xz}
+  validate_archive_paths "$runner_archive"
+  validate_archive_paths "$node_archive"
+
+  /usr/bin/install -d -o root -g root -m 0700 "$ENGINEERING_ROOT"
+  /usr/bin/rm -f -- "$CLEANUP_MARKER"
+  /usr/bin/systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
+  stop_initial_runner
+  if ! /usr/bin/id -u "$RUNNER_USER" >/dev/null 2>&1; then
+    /usr/sbin/useradd --system --create-home --home-dir /var/lib/amniora-runner --shell /usr/sbin/nologin "$RUNNER_USER"
+  fi
+  if ! runner_in_docker_group; then
+    /usr/bin/install -o root -g root -m 0600 /dev/null "$MEMBERSHIP_MARKER"
+    /usr/sbin/usermod -aG "$DOCKER_GROUP" "$RUNNER_USER"
+  fi
+  runner_in_docker_group || die "runner_docker_membership_failed"
+  engineering_user_in_docker_group && die "engineering_user_has_docker_access"
+
+  [[ ! -L "$INSTALL_ROOT" && ! -L "$STATE_ROOT" ]] || die "unsafe_phase_path"
+  /usr/bin/rm -rf -- "${INSTALL_ROOT}/runner" "${INSTALL_ROOT}/node"
+  /usr/bin/install -d -o root -g "$RUNNER_GROUP" -m 0755 \
+    "$INSTALL_ROOT" "${INSTALL_ROOT}/runner" "${INSTALL_ROOT}/engineering"
+  /usr/bin/install -d -o "$RUNNER_USER" -g "$RUNNER_GROUP" -m 0700 "$STATE_ROOT"
+  /usr/bin/tar --no-same-owner --no-same-permissions -xzf "$runner_archive" -C "${INSTALL_ROOT}/runner"
+  /usr/bin/tar --no-same-owner --no-same-permissions -xJf "$node_archive" -C "$INSTALL_ROOT"
+  /usr/bin/mv "${INSTALL_ROOT}/${node_directory}" "${INSTALL_ROOT}/node"
+  /usr/bin/install -o root -g "$RUNNER_GROUP" -m 0644 "$broker_cert" "${INSTALL_ROOT}/broker-cert.pem"
+  /usr/bin/install -o root -g "$RUNNER_GROUP" -m 0644 "$verification_keys" "${INSTALL_ROOT}/verification-keys.json"
+  /usr/bin/chown -R "root:${RUNNER_GROUP}" "${INSTALL_ROOT}/runner" "${INSTALL_ROOT}/node"
+  /usr/bin/chmod -R u=rwX,g=rX,o= "${INSTALL_ROOT}/runner" "${INSTALL_ROOT}/node"
+  /usr/bin/chmod go-w "$INSTALL_ROOT"
+  write_fixed_inspector
+  write_fixed_service
+  /usr/bin/systemctl daemon-reload
+  /usr/bin/systemctl enable "$SERVICE" >/dev/null
+  /usr/sbin/runuser -u "$RUNNER_USER" -- "${INSTALL_ROOT}/node/bin/node" --version >/dev/null 2>&1 ||
+    die "runner_node_execution_failed"
+  /usr/sbin/runuser -u "$RUNNER_USER" -- "${INSTALL_ROOT}/node/bin/node" -e \
+    'require("/opt/amniora-runner-phase16a2b1/runner/byo-runner/runtime-cli.js")' >/dev/null 2>&1 ||
+    die "runner_module_load_failed"
+  /usr/sbin/runuser -u "$RUNNER_USER" -- /usr/bin/docker version --format '{{.Server.Version}}' >/dev/null
+  printf 'installed\n'
+}
+
+verb_initial_runner() {
+  [[ -x "${INSTALL_ROOT}/node/bin/node" && -f "${INSTALL_ROOT}/runner/vm-runtime-entry.cjs" ]] || die "runner_not_installed"
+  local token launcher exit_code=0 child_observed=false last_stage=""
+  local observed_pid=0 observed_ppid=0 observed_uid=0 observed_state="UNKNOWN" observed_start_ticks=0
+  token=$(read_enrollment_token)
+  stop_initial_runner
+  /usr/bin/rm -f -- "${STAGE_ROOT}/initial-runner.log" "$BOOTSTRAP_STATE"
+  printf '%s' "$token" | /usr/bin/nohup /usr/sbin/runuser -u "$RUNNER_USER" -- \
+    /usr/bin/env \
+      AMNIORA_BYO_BROKER_HOST=10.0.2.2 \
+      AMNIORA_BYO_BROKER_PORT="$BROKER_PORT" \
+      AMNIORA_BYO_BROKER_SERVER_NAME=amniora-byo-broker.test \
+      AMNIORA_BYO_BROKER_CA_PATH="${INSTALL_ROOT}/broker-cert.pem" \
+      AMNIORA_BYO_OWNER_ID=11111111-1111-4111-8111-111111111111 \
+      AMNIORA_BYO_STATE_DIR="$STATE_ROOT" \
+      AMNIORA_BYO_VERIFICATION_KEYS_PATH="${INSTALL_ROOT}/verification-keys.json" \
+      AMNIORA_BYO_RUNTIME_CONTAINER_CONTEXT="${INSTALL_ROOT}/runner/container" \
+      AMNIORA_BYO_ENROLLMENT_STDIN=1 \
+      AMNIORA_BYO_BOOTSTRAP_DIAGNOSTICS=1 \
+      "${INSTALL_ROOT}/node/bin/node" "${INSTALL_ROOT}/runner/vm-runtime-entry.cjs" serve \
+      >"${STAGE_ROOT}/initial-runner.log" 2>&1 &
+  launcher=$!
+  unset token
+  for _ in {1..1000}; do
+    if runner_process_snapshot "$launcher"; then
+      child_observed=true
+      observed_pid="$launcher"
+      observed_ppid="$PROCESS_PPID"
+      observed_uid="$PROCESS_REAL_UID"
+      observed_state="$PROCESS_STATE"
+      observed_start_ticks="$PROCESS_START_TICKS"
+    elif observe_runner_child "$launcher"; then
+      child_observed=true
+      observed_pid="$OBSERVED_CHILD_PID"
+      observed_ppid="$OBSERVED_CHILD_PPID"
+      observed_uid="$OBSERVED_CHILD_UID"
+      observed_state="$OBSERVED_CHILD_STATE"
+      observed_start_ticks="$OBSERVED_CHILD_START_TICKS"
+    fi
+    if read_bootstrap_state "$BOOTSTRAP_STATE"; then
+      if [[ "$BOOTSTRAP_STAGE" == "FAILED" ]]; then
+        abort_initial_runner "$launcher" "initial_runner_failed_${BOOTSTRAP_EXIT_CLASSIFICATION}"
+      fi
+      if ! runner_process_snapshot "$BOOTSTRAP_PID"; then
+        if [[ "$PROCESS_SNAPSHOT_FAILURE" == "EXITED" || "$PROCESS_SNAPSHOT_FAILURE" == "UNAVAILABLE" ]]; then
+          last_stage="$BOOTSTRAP_STAGE"
+          /usr/bin/sleep 0.05
+          if read_bootstrap_state "$BOOTSTRAP_STATE" && [[ "$BOOTSTRAP_STAGE" == "FAILED" ]]; then
+            abort_initial_runner "$launcher" "initial_runner_failed_${BOOTSTRAP_EXIT_CLASSIFICATION}"
+          fi
+          abort_initial_runner "$launcher" "initial_runner_exited_after_${last_stage}"
+        fi
+        abort_initial_runner "$launcher" "initial_runner_identity_invalid_${PROCESS_SNAPSHOT_FAILURE}"
+      fi
+      [[ "$BOOTSTRAP_UID" == "$PROCESS_REAL_UID" ]] ||
+        abort_initial_runner "$launcher" "initial_runner_reported_uid_mismatch"
+      [[ "$BOOTSTRAP_PPID" == "$PROCESS_PPID" ]] ||
+        abort_initial_runner "$launcher" "initial_runner_reported_ppid_changed"
+      [[ "$BOOTSTRAP_PPID" == "$launcher" ]] ||
+        abort_initial_runner "$launcher" "initial_runner_process_tree_mismatch"
+      write_initial_identity "$launcher"
+      emit_bootstrap_state true true "$PROCESS_STATE" "$PROCESS_START_TICKS" "$launcher"
+      return
+    fi
+    if ! kill -0 "$launcher" 2>/dev/null; then
+      set +e
+      wait "$launcher"
+      exit_code=$?
+      set -e
+      if [[ "$child_observed" == "true" ]]; then
+        if runner_process_snapshot "$observed_pid" && [[ "$PROCESS_START_TICKS" == "$observed_start_ticks" ]]; then
+          emit_launch_observation true "$observed_pid" "$PROCESS_PPID" "$PROCESS_REAL_UID" "$PROCESS_STATE" MATCH
+          stop_observed_child "$observed_pid" "$observed_start_ticks"
+          die "initial_runner_launcher_exited_status_${exit_code}_child_alive"
+        fi
+        emit_launch_observation true "$observed_pid" "$observed_ppid" "$observed_uid" EXITED MATCH
+        die "initial_runner_launcher_exited_status_${exit_code}_after_node_observed"
+      fi
+      emit_launch_observation false 0 0 0 UNKNOWN UNAVAILABLE
+      die "initial_runner_launcher_exited_status_${exit_code}_before_node_observed"
+    fi
+    /usr/bin/sleep 0.01
+  done
+  if [[ "$child_observed" == "true" ]] && runner_process_snapshot "$observed_pid" &&
+     [[ "$PROCESS_START_TICKS" == "$observed_start_ticks" ]]; then
+    emit_launch_observation true "$observed_pid" "$PROCESS_PPID" "$PROCESS_REAL_UID" "$PROCESS_STATE" MATCH
+    stop_observed_child "$observed_pid" "$observed_start_ticks"
+    abort_initial_runner "$launcher" "initial_runner_ack_timeout_after_node_observed"
+  fi
+  emit_launch_observation false 0 0 0 UNKNOWN UNAVAILABLE
+  abort_initial_runner "$launcher" "initial_runner_ack_timeout_before_node_observed"
+}
+
+verb_bootstrap_status() {
+  local launcher_pid=0
+  if [[ -f "$INITIAL_LAUNCHER_PID" && ! -L "$INITIAL_LAUNCHER_PID" ]]; then
+    launcher_pid=$(<"$INITIAL_LAUNCHER_PID")
+    [[ "$launcher_pid" =~ ^[1-9][0-9]*$ ]] || die "invalid_launcher_pid"
+  fi
+  read_bootstrap_state "$BOOTSTRAP_STATE" || die "bootstrap_state_unavailable"
+  if [[ "$BOOTSTRAP_STAGE" == "FAILED" ]]; then
+    emit_bootstrap_state false false "EXITED" 0 "$launcher_pid"
+    return
+  fi
+  if ! runner_process_snapshot "$BOOTSTRAP_PID"; then
+    if [[ "$PROCESS_SNAPSHOT_FAILURE" == "EXITED" || "$PROCESS_SNAPSHOT_FAILURE" == "UNAVAILABLE" ]]; then
+      emit_bootstrap_state false false "EXITED" 0 "$launcher_pid"
+      return
+    fi
+    die "bootstrap_identity_invalid_${PROCESS_SNAPSHOT_FAILURE}"
+  fi
+  [[ "$BOOTSTRAP_UID" == "$PROCESS_REAL_UID" && "$BOOTSTRAP_PPID" == "$PROCESS_PPID" ]] ||
+    die "bootstrap_identity_mismatch"
+  if [[ -f "$INITIAL_PID" && -f "$INITIAL_START_TICKS" ]]; then
+    [[ $(<"$INITIAL_PID") == "$BOOTSTRAP_PID" && $(<"$INITIAL_START_TICKS") == "$PROCESS_START_TICKS" ]] ||
+      die "bootstrap_identity_changed"
+  fi
+  emit_bootstrap_state true true "$PROCESS_STATE" "$PROCESS_START_TICKS" "$launcher_pid"
+}
+
+verb_replay_enrollment() {
+  local token result="unexpected" exit_code=0
+  token=$(read_enrollment_token)
+  /usr/bin/rm -rf -- "$REPLAY_ROOT" "${STAGE_ROOT}/replay.log"
+  /usr/bin/install -d -o "$RUNNER_USER" -g "$RUNNER_GROUP" -m 0700 "$REPLAY_ROOT"
+  set +e
+  printf '%s' "$token" | /usr/sbin/runuser -u "$RUNNER_USER" -- /usr/bin/timeout 12 \
+    /usr/bin/env \
+      AMNIORA_BYO_BROKER_HOST=10.0.2.2 \
+      AMNIORA_BYO_BROKER_PORT="$BROKER_PORT" \
+      AMNIORA_BYO_BROKER_SERVER_NAME=amniora-byo-broker.test \
+      AMNIORA_BYO_BROKER_CA_PATH="${INSTALL_ROOT}/broker-cert.pem" \
+      AMNIORA_BYO_OWNER_ID=11111111-1111-4111-8111-111111111111 \
+      AMNIORA_BYO_STATE_DIR="$REPLAY_ROOT" \
+      AMNIORA_BYO_VERIFICATION_KEYS_PATH="${INSTALL_ROOT}/verification-keys.json" \
+      AMNIORA_BYO_RUNTIME_CONTAINER_CONTEXT="${INSTALL_ROOT}/runner/container" \
+      AMNIORA_BYO_ENROLLMENT_STDIN=1 \
+      AMNIORA_BYO_BOOTSTRAP_DIAGNOSTICS=1 \
+      "${INSTALL_ROOT}/node/bin/node" "${INSTALL_ROOT}/runner/vm-runtime-entry.cjs" serve \
+      >"${STAGE_ROOT}/replay.log" 2>&1
+  exit_code=$?
+  set -e
+  unset token
+  if read_bootstrap_state "${REPLAY_ROOT}/bootstrap-state.v1" &&
+     [[ "$BOOTSTRAP_STAGE" == "FAILED" && "$BOOTSTRAP_EXIT_CLASSIFICATION" == "ENROLLMENT_REPLAYED" ]]; then
+    result="denied"
+  fi
+  /usr/bin/rm -rf -- "$REPLAY_ROOT" "${STAGE_ROOT}/replay.log"
+  [[ "$result" == "denied" ]] || die "enrollment_replay_not_denied_${exit_code}"
+  printf 'denied\n'
+}
+
+verb_service_start() {
+  /usr/bin/systemctl start "$SERVICE"
+  printf 'started\n'
+}
+
+verb_service_stop() {
+  /usr/bin/systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+  stop_initial_runner
+  printf 'stopped\n'
+}
+
+verb_inspect_runtime() {
+  [[ -x "$INSPECT_SCRIPT" ]] || die "fixed_inspector_missing"
+  /usr/sbin/runuser -u "$RUNNER_USER" -- "${INSTALL_ROOT}/node/bin/node" "$INSPECT_SCRIPT"
+}
+
+verb_check_outbound() {
+  local ids id session generation role output
+  mapfile -t ids < <(/usr/bin/docker container ls -q \
+    --filter "label=${MANAGED_LABEL}" \
+    --filter "label=${RUNTIME_MODE_LABEL}" \
+    --filter 'label=com.amniora.local-runner.role=challenge')
+  [[ ${#ids[@]} -eq 1 && "${ids[0]}" =~ ^[0-9a-f]{12,64}$ ]] || die "invalid_challenge_container_count"
+  id="${ids[0]}"
+  role=$(/usr/bin/docker inspect --format '{{ index .Config.Labels "com.amniora.local-runner.role" }}' "$id")
+  session=$(/usr/bin/docker inspect --format '{{ index .Config.Labels "com.amniora.local-runner.session" }}' "$id")
+  generation=$(/usr/bin/docker inspect --format '{{ index .Config.Labels "com.amniora.local-runner.generation" }}' "$id")
+  [[ "$role" == "challenge" && "$session" =~ ^[0-9a-f]{32}$ && "$generation" =~ ^[1-9][0-9]*$ ]] ||
+    die "invalid_challenge_identity"
+  output=$(/usr/bin/docker exec "$id" node -e \
+    'const net=require("node:net");let done=false;const finish=(value,code)=>{if(done)return;done=true;console.log(value);process.exit(code)};const socket=net.createConnection({host:"1.1.1.1",port:80});socket.on("connect",()=>finish("reachable",2));socket.on("error",()=>finish("blocked",0));setTimeout(()=>{socket.destroy();finish("blocked",0)},2000);')
+  [[ "$output" == "blocked" ]] || die "challenge_outbound_reachable"
+  printf 'blocked\n'
+}
+
+remove_managed_resources() {
+  local ids id managed mode role
+  mapfile -t ids < <(managed_container_ids)
+  for id in "${ids[@]}"; do
+    [[ "$id" =~ ^[0-9a-f]{12,64}$ ]] || die "invalid_managed_container_id"
+    managed=$(/usr/bin/docker inspect --format '{{ index .Config.Labels "com.amniora.local-runner.managed" }}' "$id")
+    mode=$(/usr/bin/docker inspect --format '{{ index .Config.Labels "com.amniora.local-runner.runtime-mode" }}' "$id")
+    role=$(/usr/bin/docker inspect --format '{{ index .Config.Labels "com.amniora.local-runner.role" }}' "$id")
+    [[ "$managed" == "true" && "$mode" == "local-runner" && ( "$role" == "challenge" || "$role" == "proxy" ) ]] ||
+      die "refusing_unmanaged_container_cleanup"
+    /usr/bin/docker container rm -f "$id" >/dev/null
+  done
+  mapfile -t ids < <(managed_network_ids)
+  for id in "${ids[@]}"; do
+    [[ "$id" =~ ^[0-9a-f]{12,64}$ ]] || die "invalid_managed_network_id"
+    managed=$(/usr/bin/docker network inspect --format '{{ index .Labels "com.amniora.local-runner.managed" }}' "$id")
+    mode=$(/usr/bin/docker network inspect --format '{{ index .Labels "com.amniora.local-runner.runtime-mode" }}' "$id")
+    role=$(/usr/bin/docker network inspect --format '{{ index .Labels "com.amniora.local-runner.role" }}' "$id")
+    [[ "$managed" == "true" && "$mode" == "local-runner" && "$role" == "network" ]] ||
+      die "refusing_unmanaged_network_cleanup"
+    /usr/bin/docker network rm "$id" >/dev/null
+  done
+}
+
+verb_cleanup() {
+  /usr/bin/install -d -o root -g root -m 0700 "$ENGINEERING_ROOT"
+  /usr/bin/systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
+  stop_initial_runner
+  remove_managed_resources
+  /usr/bin/docker image rm "$IMAGE" >/dev/null 2>&1 || true
+  /usr/bin/docker image inspect "$IMAGE" >/dev/null 2>&1 && die "test_image_cleanup_failed"
+  /usr/bin/rm -f -- "$UNIT_PATH"
+  /usr/bin/systemctl daemon-reload
+  /usr/bin/systemctl is-active --quiet "$SERVICE" && die "runner_service_still_active"
+  if [[ -f "$MEMBERSHIP_MARKER" ]]; then
+    if runner_in_docker_group; then /usr/bin/gpasswd -d "$RUNNER_USER" "$DOCKER_GROUP" >/dev/null; fi
+    runner_in_docker_group && die "runner_docker_membership_cleanup_failed"
+    /usr/bin/rm -f -- "$MEMBERSHIP_MARKER"
+  fi
+  engineering_user_in_docker_group && die "engineering_user_has_docker_access"
+  /usr/bin/rm -rf -- "$INSTALL_ROOT" "$STATE_ROOT" "$REPLAY_ROOT" "$STAGE_ROOT"
+  [[ ! -e "$UNIT_PATH" && ! -e "$INSTALL_ROOT" && ! -e "$STATE_ROOT" && ! -e "$REPLAY_ROOT" && ! -e "$STAGE_ROOT" ]] ||
+    die "phase_path_cleanup_failed"
+  [[ $(managed_container_ids | /usr/bin/wc -l) -eq 0 ]] || die "managed_container_cleanup_failed"
+  [[ $(managed_network_ids | /usr/bin/wc -l) -eq 0 ]] || die "managed_network_cleanup_failed"
+  /usr/bin/install -o root -g root -m 0600 /dev/null "$CLEANUP_MARKER"
+  printf '{"service":"absent","phasePaths":"absent","managedContainers":0,"managedNetworks":0,"testImage":"absent","runnerDockerMembership":"absent","engineeringUserDocker":"absent"}\n'
+}
+
+verb_revoke() {
+  [[ -f "$CLEANUP_MARKER" && ! -L "$CLEANUP_MARKER" ]] || die "cleanup_not_complete"
+  [[ ! -e "$MEMBERSHIP_MARKER" ]] || die "runner_membership_not_revoked"
+  engineering_user_in_docker_group && die "engineering_user_has_docker_access"
+  [[ ! -e "$UNIT_PATH" && ! -e "$INSTALL_ROOT" && ! -e "$STATE_ROOT" && ! -e "$REPLAY_ROOT" && ! -e "$STAGE_ROOT" ]] ||
+    die "phase_paths_still_present"
+  [[ $(managed_container_ids | /usr/bin/wc -l) -eq 0 ]] || die "managed_containers_still_present"
+  [[ $(managed_network_ids | /usr/bin/wc -l) -eq 0 ]] || die "managed_networks_still_present"
+  /usr/bin/docker image inspect "$IMAGE" >/dev/null 2>&1 && die "test_image_still_present"
+  /usr/bin/rm -rf -- "$ENGINEERING_ROOT"
+  /usr/bin/rm -f -- "$DISPATCHER_PATH"
+  /usr/bin/rm -f -- "$POLICY_PATH"
+  printf 'revoked\n'
+}
+
+main() {
+  [[ $# -eq 1 ]] || die "unexpected_arguments"
+  local verb="$1"
+  case "$verb" in
+    preflight|install|initial-runner|bootstrap-status|replay-enrollment|service-start|service-stop|managed-counts|inspect-runtime|check-outbound|cleanup|revoke) ;;
+    *) die "unknown_verb" ;;
+  esac
+  require_root
+  case "$verb" in
+    preflight) verb_preflight ;;
+    install) verb_install ;;
+    initial-runner) verb_initial_runner ;;
+    bootstrap-status) verb_bootstrap_status ;;
+    replay-enrollment) verb_replay_enrollment ;;
+    service-start) verb_service_start ;;
+    service-stop) verb_service_stop ;;
+    managed-counts) managed_counts ;;
+    inspect-runtime) verb_inspect_runtime ;;
+    check-outbound) verb_check_outbound ;;
+    cleanup) verb_cleanup ;;
+    revoke) verb_revoke ;;
+  esac
+}
+
+main "$@"

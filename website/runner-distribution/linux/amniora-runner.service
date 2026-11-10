@@ -1,0 +1,42 @@
+[Unit]
+Description=Amniora Runner
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+StartLimitIntervalSec=120s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=amniora-runner
+Group=amniora-runner
+SupplementaryGroups=docker
+WorkingDirectory=/var/lib/amniora-runner
+EnvironmentFile=-/etc/amniora-runner/runner.conf
+RuntimeDirectory=amniora-runner
+RuntimeDirectoryMode=0750
+ExecStart=/opt/amniora-runner/current/bin/amniora-runner-launch
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ReadWritePaths=/var/lib/amniora-runner /run/amniora-runner
+
+[Install]
+WantedBy=multi-user.target

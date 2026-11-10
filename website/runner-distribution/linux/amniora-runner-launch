@@ -1,0 +1,21 @@
+#!/bin/bash
+set -euo pipefail
+
+readonly INSTALL_ROOT="/opt/amniora-runner"
+readonly STATE_ROOT="/var/lib/amniora-runner"
+readonly ENROLLMENT_FILE="/run/amniora-runner/enrollment"
+readonly NODE="${INSTALL_ROOT}/current/bin/node"
+readonly ENTRY="${INSTALL_ROOT}/current/lib/entry.cjs"
+readonly IDENTITY="${STATE_ROOT}/runner-identity.json"
+
+if [[ ! -x "$NODE" || ! -f "$ENTRY" || -L "$ENTRY" ]]; then
+  printf 'RUNNER_INSTALL_INVALID\n' >&2
+  exit 1
+fi
+
+if [[ ! -f "$IDENTITY" && -f "$ENROLLMENT_FILE" && ! -L "$ENROLLMENT_FILE" ]]; then
+  export AMNIORA_BYO_ENROLLMENT_STDIN=1
+  exec "$NODE" "$ENTRY" serve <"$ENROLLMENT_FILE"
+fi
+
+exec "$NODE" "$ENTRY" serve </dev/null

@@ -1,0 +1,17 @@
+User_Alias AMNIORA_PHASE16B_USER = amniora
+
+Cmnd_Alias AMNIORA_PHASE16B_CTL = \
+    /usr/local/sbin/amniora-phase16b-product-e2e preflight, \
+    /usr/local/sbin/amniora-phase16b-product-e2e install, \
+    /usr/local/sbin/amniora-phase16b-product-e2e initial-runner, \
+    /usr/local/sbin/amniora-phase16b-product-e2e bootstrap-status, \
+    /usr/local/sbin/amniora-phase16b-product-e2e replay-enrollment, \
+    /usr/local/sbin/amniora-phase16b-product-e2e service-start, \
+    /usr/local/sbin/amniora-phase16b-product-e2e service-stop, \
+    /usr/local/sbin/amniora-phase16b-product-e2e managed-counts, \
+    /usr/local/sbin/amniora-phase16b-product-e2e inspect-runtime, \
+    /usr/local/sbin/amniora-phase16b-product-e2e check-outbound, \
+    /usr/local/sbin/amniora-phase16b-product-e2e cleanup, \
+    /usr/local/sbin/amniora-phase16b-product-e2e revoke
+
+AMNIORA_PHASE16B_USER ALL=(root) NOPASSWD: AMNIORA_PHASE16B_CTL

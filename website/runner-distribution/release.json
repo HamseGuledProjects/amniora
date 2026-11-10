@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "runnerVersion": "1.0.0",
+  "protocolVersion": "1.0",
+  "minimumCompatibleVersion": "1.0.0",
+  "supportedOs": "ubuntu-24.04",
+  "minimumDockerVersion": "24.0.0",
+  "nodeVersion": "22.23.3",
+  "sourceDateEpoch": 1790380800,
+  "distributionOrigin": "https://runner.portfolio.example.test",
+  "installerPath": "/runner/installers/1.0.0/install.sh",
+  "brokerEndpoint": "https://broker.runner.portfolio.example.test:443/connect",
+  "architectures": {
+    "amd64": {
+      "nodeArchitecture": "x64",
+      "nodeArchive": "node-v22.23.3-linux-x64.tar.xz",
+      "nodeArchiveSha256": "df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de"
+    },
+    "arm64": {
+      "nodeArchitecture": "arm64",
+      "nodeArchive": "node-v22.23.3-linux-arm64.tar.xz",
+      "nodeArchiveSha256": "a44aeb94849a299b22df10b9e622ec2f605c2183501bc40590705131de7c740f"
+    }
+  }
+}

@@ -1,0 +1,46 @@
+#!/bin/bash
+set -euo pipefail
+
+readonly INSTALL_ROOT="/opt/amniora-runner"
+readonly STATE_ROOT="/var/lib/amniora-runner"
+readonly CONFIG_ROOT="/etc/amniora-runner"
+readonly UNIT="/etc/systemd/system/amniora-runner.service"
+readonly COMMAND="/usr/local/sbin/amniora-runner-uninstall"
+readonly USER="amniora-runner"
+readonly MEMBERSHIP_MARKER="${STATE_ROOT}/install/docker-membership-created"
+readonly USER_MARKER="${STATE_ROOT}/install/service-account-created"
+
+purge_identity=false
+if [[ $# -gt 1 ]]; then
+  printf 'Usage: amniora-runner-uninstall [--purge-identity]\n' >&2
+  exit 2
+fi
+if [[ $# -eq 1 ]]; then
+  [[ "$1" == "--purge-identity" ]] || { printf 'invalid_uninstall_option\n' >&2; exit 2; }
+  purge_identity=true
+fi
+[[ ${EUID} -eq 0 ]] || { printf 'Run with sudo.\n' >&2; exit 1; }
+
+/usr/bin/systemctl stop amniora-runner.service >/dev/null 2>&1 || true
+/usr/bin/systemctl disable amniora-runner.service >/dev/null 2>&1 || true
+
+if [[ -f "$MEMBERSHIP_MARKER" && ! -L "$MEMBERSHIP_MARKER" ]] && /usr/bin/id "$USER" >/dev/null 2>&1; then
+  /usr/sbin/deluser "$USER" docker >/dev/null 2>&1 || true
+  /usr/bin/rm -f -- "$MEMBERSHIP_MARKER"
+fi
+
+/usr/bin/rm -f -- "$UNIT" "$COMMAND"
+/usr/bin/rm -rf -- "$INSTALL_ROOT" "$CONFIG_ROOT" /run/amniora-runner
+/usr/bin/systemctl daemon-reload
+
+if $purge_identity; then
+  local_user_created=false
+  [[ -f "$USER_MARKER" && ! -L "$USER_MARKER" ]] && local_user_created=true
+  /usr/bin/rm -rf -- "$STATE_ROOT"
+  if $local_user_created && /usr/bin/id "$USER" >/dev/null 2>&1; then
+    /usr/sbin/userdel "$USER"
+  fi
+  printf 'Amniora Runner removed; durable local identity deleted. Disconnect the VM in Amniora to revoke the server association.\n'
+else
+  printf 'Amniora Runner removed; durable local identity preserved for reinstall.\n'
+fi
