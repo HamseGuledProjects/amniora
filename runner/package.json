@@ -1,0 +1,27 @@
+{
+  "name": "amniora-runner-source",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "author": "Hamse Guled",
+  "description": "Amniora native Runner applications and shared protocol implementation",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "compile:shared": "node scripts/compile-shared.cjs"
+  },
+  "dependencies": {
+    "@sentry/nextjs": "10.75.2",
+    "@supabase/ssr": "0.12.0",
+    "@supabase/supabase-js": "2.110.0",
+    "@vercel/sandbox": "3.3.0",
+    "next": "16.4.6",
+    "postgres": "3.4.9",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "server-only": "0.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Amniora.Windows.Contracts</AssemblyName>
+    <RootNamespace>Amniora.Windows.Contracts</RootNamespace>
+    <NoWarn>$(NoWarn);MSB3277</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Amniora.Runner/Amniora.Runner.csproj" />
+    <ProjectReference Include="../Amniora.Viewer/Amniora.Viewer.csproj" />
+    <ProjectReference Include="../Amniora.Viewer.HostileTests/Amniora.Viewer.HostileTests.csproj" />
+  </ItemGroup>
+</Project>

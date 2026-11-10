@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Amniora.Runner.IdentityHelper</AssemblyName>
+    <RootNamespace>Amniora.Runner.IdentityHelper</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Amniora.Runner/Amniora.Runner.csproj" />
+  </ItemGroup>
+</Project>

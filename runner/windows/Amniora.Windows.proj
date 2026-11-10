@@ -1,0 +1,16 @@
+<Project>
+  <ItemGroup>
+    <ProjectFiles Include="Amniora.Windows.Contracts/Amniora.Windows.Contracts.csproj" />
+    <ProjectFiles Include="Amniora.Runner.IdentityHelper/Amniora.Runner.IdentityHelper.csproj" />
+  </ItemGroup>
+  <Target Name="Restore">
+    <MSBuild Projects="@(ProjectFiles)" Targets="Restore" BuildInParallel="true" />
+  </Target>
+  <Target Name="Build">
+    <MSBuild Projects="@(ProjectFiles)" Targets="Build" BuildInParallel="true" Properties="Configuration=$(Configuration)" />
+  </Target>
+  <Target Name="Test" DependsOnTargets="Restore;Build">
+    <Exec Command="dotnet &quot;$(MSBuildThisFileDirectory)Amniora.Windows.Contracts/bin/$(Configuration)/net8.0-windows10.0.19041.0/win-x64/Amniora.Windows.Contracts.dll&quot;" />
+    <Exec Command="dotnet &quot;$(MSBuildThisFileDirectory)Amniora.Viewer.HostileTests/bin/$(Configuration)/net8.0-windows10.0.19041.0/win-x64/Amniora.Viewer.HostileTests.dll&quot;" />
+  </Target>
+</Project>

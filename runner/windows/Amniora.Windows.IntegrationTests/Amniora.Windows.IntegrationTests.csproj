@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><AssemblyName>Amniora.Windows.IntegrationTests</AssemblyName></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../Amniora.Runner/Amniora.Runner.csproj" /></ItemGroup>
+</Project>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleExecutable</key><string>AmnioraRunner</string>
+  <key>CFBundleIdentifier</key><string>com.amniora.runner.phase5</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundleName</key><string>Amniora Runner</string>
+  <key>CFBundleDisplayName</key><string>Amniora Runner</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.6.0</string>
+  <key>CFBundleVersion</key><string>6</string>
+  <key>AmnioraServerOrigin</key><string>https://portfolio.example.test</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>CFBundleURLTypes</key><array><dict>
+    <key>CFBundleURLName</key><string>com.amniora.runner.activation</string>
+    <key>CFBundleURLSchemes</key><array><string>com.amniora.runner</string></array>
+</dict></array>
+</dict></plist>
